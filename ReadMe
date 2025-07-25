@@ -6,8 +6,6 @@
 
 The **TOC Summarizer AI** is a sleek, modern browser extension designed to cut through the dense jargon of Terms and Conditions, Privacy Policies, and other legal documents. With a single click, it leverages the power of Google's Gemini AI to provide a concise, easy-to-understand summary, helping users quickly grasp key obligations, data privacy clauses, and termination details without sifting through endless paragraphs.
 
-Inspired by a "Tron" aesthetic, this extension offers a visually striking and intuitive user interface.
-
 ## ✨ Features
 
 * **AI-Powered Summarization:** Utilizes the Gemini API to generate intelligent summaries of legal text.
