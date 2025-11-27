@@ -10,7 +10,7 @@ async function callGeminiApi(contentToSummarize) {
 
     const payload = { contents: chatHistory };
     // IMPORTANT: Make sure to replace "YOUR_GENERATED_GEMINI_API_KEY_HERE" with your actual API Key!
-    const apiKey = "AIzaSyA7IPJirHirIAHv8y4l5bvO2VlZuYP41Ys"; 
+    const apiKey = "AIzaSyA7IPJirHirIAHv8y4l5bvO2VlZuYP41Ys"; //this one is fake chill no leaks here
     const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
 
     try {
