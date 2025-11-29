@@ -28,6 +28,9 @@
     "128": "icons/icon128.png"
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; style-src 'self' https://cdn.tailwindcss.com; connect-src 'self' https://generativelanguage.googleapis.com;"
-  }
+  "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; style-src 'self'; connect-src 'self' http://localhost:3000 http://127.0.0.1:3000 https://generativelanguage.googleapis.com;"
 }
+}
+
+
+

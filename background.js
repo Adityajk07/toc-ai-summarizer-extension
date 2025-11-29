@@ -1,98 +1,131 @@
-// background.js
+// background.js (full replacement)
+// DEBUGGING + robust message flow + proxy usage
 
-// Function to call the Gemini API for summarization
-async function callGeminiApi(contentToSummarize) {
-    // UPDATED PROMPT: Shorter and easier to understand, as per user's request
-    const prompt = `Summarize the following Terms and Conditions or legal document in a concise, easy-to-understand manner, highlighting key points, user obligations, data privacy, and termination clauses. Make it under 200 words and highlight important points and format it in an easy to understand, not boring manner.Use bullet points bold text etc where relevant`;
+// Top-level debug log so we know the SW loaded
+console.log('🟢 background SW loaded - TOC Summarizer');
 
-    let chatHistory = [];
-    chatHistory.push({ role: "user", parts: [{ text: prompt + '\n\n' + contentToSummarize }] }); // Concatenate prompt and content
+const PROXY_URL = 'http://localhost:3000/proxy/gemini'; // update if you changed port
 
-    const payload = { contents: chatHistory };
-    // IMPORTANT: Make sure to replace "YOUR_GENERATED_GEMINI_API_KEY_HERE" with your actual API Key!
-    const apiKey = "YOUR_GENERATED_GEMINI_API_KEY_HERE"; //this one is fake chill no leaks here
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
-
-    try {
-        const apiResponse = await fetch(apiUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-
-        if (!apiResponse.ok) {
-            const errorData = await apiResponse.json();
-            throw new Error(`API error: ${apiResponse.status} - ${errorData.error.message || apiResponse.statusText}`);
+// small safe helper for sending messages to a tab with retries (handles race)
+function sendMessageToTabWithRetry(tabId, msg, attempts = 8, delay = 80) {
+  return new Promise((resolve) => {
+    let tries = 0;
+    function attempt() {
+      chrome.tabs.sendMessage(tabId, msg, (resp) => {
+        const lastErr = chrome.runtime.lastError && chrome.runtime.lastError.message;
+        console.log(`background: sendMessage attempt ${tries + 1}, lastError=`, lastErr, 'resp=', resp);
+        if (!lastErr) return resolve(resp);
+        tries++;
+        if (tries < attempts && /Receiving end does not exist/.test(lastErr)) {
+          return setTimeout(attempt, delay);
         }
-
-        const result = await apiResponse.json();
-
-        if (result.candidates && result.candidates.length > 0 &&
-            result.candidates[0].content && result.candidates[0].content.parts &&
-            result.candidates[0].content.parts.length > 0) {
-            return { success: true, summary: result.candidates[0].content.parts[0].text };
-        } else {
-            return { success: false, error: 'No summary returned from AI.' };
-        }
-    } catch (error) {
-        console.error('Error calling Gemini API:', error);
-        return { success: false, error: `Failed to summarize: ${error.message}` };
+        // give up
+        return resolve(null);
+      });
     }
+    attempt();
+  });
+}
+
+// call Gemini via local proxy (payload is the same shape you used)
+async function callGeminiApi(contentToSummarize) {
+  const prompt = `Summarize the following Terms and Conditions or legal document in a concise, easy-to-understand manner, highlighting key points, user obligations, data privacy, and termination clauses. Make it under 200 words and highlight important points and format it in an easy to understand, not boring manner. Use bullet points, bold text etc where relevant.`;
+
+  const chatHistory = [{ role: "user", parts: [{ text: prompt + '\n\n' + contentToSummarize }] }];
+  const payload = { contents: chatHistory };
+
+  try {
+    console.log('background: calling proxy', PROXY_URL, 'payload_length=', JSON.stringify(payload).length);
+    const apiResponse = await fetch(PROXY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    if (!apiResponse.ok) {
+      let errText;
+      try { errText = await apiResponse.json(); } catch (e) { errText = await apiResponse.text(); }
+      throw new Error(`Proxy/API error: ${apiResponse.status} - ${JSON.stringify(errText)}`);
+    }
+
+    const result = await apiResponse.json();
+    console.log('background: proxy returned result keys=', Object.keys(result || {}));
+
+    if (result && result.candidates && result.candidates.length > 0 &&
+        result.candidates[0].content && result.candidates[0].content.parts &&
+        result.candidates[0].content.parts.length > 0) {
+      return { success: true, summary: result.candidates[0].content.parts[0].text };
+    } else {
+      return { success: false, error: 'No summary returned from AI.' };
+    }
+  } catch (error) {
+    console.error('background: Error calling Gemini API via proxy:', error);
+    return { success: false, error: `Failed to summarize: ${error.message}` };
+  }
 }
 
 // Listener for manual summarization request from popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === 'summarizeCurrentPage') {
-        // Get the active tab
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            if (tabs.length === 0) {
-                sendResponse({ success: false, error: 'No active tab found.' });
-                return;
-            }
-            const activeTab = tabs[0];
+  if (request.action === 'summarizeCurrentPage') {
+    console.log('background: received summarizeCurrentPage request from popup', request);
 
-            // Inject the content script to get fresh page content
-            chrome.scripting.executeScript({
-                target: { tabId: activeTab.id },
-                files: ['content.js'] // Re-inject content.js to ensure it's up-to-date and runs extractPageContent
-            }, () => {
-                if (chrome.runtime.lastError) {
-                    sendResponse({ success: false, error: `Script injection failed: ${chrome.runtime.lastError.message}` });
-                    return;
-                }
-                // Once content.js is injected, send a message to it to get the page content
-                chrome.tabs.sendMessage(activeTab.id, { action: 'getPageContent' }, async (response) => {
-                    if (chrome.runtime.lastError) {
-                        sendResponse({ success: false, error: `Failed to get page content: ${chrome.runtime.lastError.message}` });
-                        return;
-                    }
+    // Get the active tab
+    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+      if (tabs.length === 0) {
+        console.error('background: no active tab found');
+        sendResponse({ success: false, error: 'No active tab found.' });
+        return;
+      }
+      const activeTab = tabs[0];
+      console.log('background: activeTab id=', activeTab.id, 'url=', activeTab.url);
 
-                    const pageContent = response.content;
+      // inject content.js into all frames of the tab (helps if TOC is inside iframe)
+      chrome.scripting.executeScript({
+        target: { tabId: activeTab.id, allFrames: true },
+        files: ['content.js']
+      }, async () => {
+        console.log('background: executeScript callback; lastError=', chrome.runtime.lastError && chrome.runtime.lastError.message);
 
-                    if (!pageContent || pageContent.trim().length === 0) {
-                        sendResponse({ success: false, error: 'Could not extract relevant text from the page. Is it a Terms & Conditions page?' });
-                        return;
-                    }
+        // Use retry sender to avoid race between injection and listener registration
+        const response = await sendMessageToTabWithRetry(activeTab.id, { action: 'getPageContent' }, 10, 100);
+        console.log('background: final response from content script =', response);
 
-                    // Truncate content if it's too long for the API (e.g., 100,000 characters)
-                    const MAX_CONTENT_LENGTH = 100000;
-                    const contentToSummarize = pageContent.length > MAX_CONTENT_LENGTH
-                        ? pageContent.substring(0, MAX_CONTENT_LENGTH)
-                        : pageContent;
+        if (!response) {
+          console.error('background: no response from content script after retries');
+          sendResponse({ success: false, error: 'No response from content script' });
+          return;
+        }
 
-                    const apiResult = await callGeminiApi(contentToSummarize);
-                    if (apiResult.success) {
-                        // Store summary for popup to retrieve later
-                        chrome.storage.local.set({ 'currentTOCSummary': apiResult.summary }, () => {
-                            sendResponse(apiResult); // Send summary back to popup
-                        });
-                    } else {
-                        sendResponse(apiResult);
-                    }
-                });
-            });
-        });
-        return true; // Indicate asynchronous response
-    }
+        const pageContent = response.content;
+        if (!pageContent || pageContent.trim().length === 0) {
+          console.warn('background: content script returned empty content');
+          sendResponse({ success: false, error: 'Could not extract relevant text from the page.' });
+          return;
+        }
+
+        const MAX_CONTENT_LENGTH = 100000;
+        const contentToSummarize = pageContent.length > MAX_CONTENT_LENGTH
+          ? pageContent.substring(0, MAX_CONTENT_LENGTH)
+          : pageContent;
+
+        // call proxy -> Gemini
+        const apiResult = await callGeminiApi(contentToSummarize);
+
+        if (apiResult.success) {
+          // Store summary for popup to retrieve later
+          chrome.storage.local.set({ 'currentTOCSummary': apiResult.summary }, () => {
+            console.log('background: stored summary, sending response to popup');
+            sendResponse(apiResult);
+          });
+        } else {
+          console.error('background: apiResult failure', apiResult);
+          sendResponse(apiResult);
+        }
+      });
+
+    });
+
+    // Keep the message channel open for async sendResponse
+    return true;
+  }
 });
-
